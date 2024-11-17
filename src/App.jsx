@@ -13,6 +13,9 @@ const GRAVITY = 30;
 const STEPS_PER_FRAME = 5;
 const playerVelocity = new THREE.Vector3();
 const keyStates = {};
+const ENEMY_DODGE_SPEED = 5; // Velocidad de esquiva de los enemigos
+const ENEMY_THROW_INTERVAL = 5; // Intervalo entre lanzamientos de enemigos
+const ENEMY_DODGE_COOLDOWN = 3; // Cooldown time in seconds
 
 const App = () => {
 
@@ -43,6 +46,24 @@ const App = () => {
   const enemiesRef = useRef([]);
   const ENEMY_SPAWN_INTERVAL = 5; // Tiempo entre spawns (segundos)
   const ENEMY_SPEED = 2; // Velocidad de los enemigos
+
+  useEffect(() => {
+    const crosshair = document.createElement("div");
+    crosshair.id = "crosshair";
+    crosshair.style.position = "absolute";
+    crosshair.style.top = "50%";
+    crosshair.style.left = "50%";
+    crosshair.style.transform = "translate(-50%, -50%)";
+    crosshair.style.width = "10px";
+    crosshair.style.height = "10px";
+    crosshair.style.background = "red";
+    crosshair.style.borderRadius = "50%";
+    document.body.appendChild(crosshair);
+
+    return () => {
+      document.body.removeChild(crosshair);
+    };
+  }, []);
 
   const onTouchMove = (event) => {
     if (document.pointerLockElement === containerRef.current) {
@@ -134,9 +155,9 @@ const App = () => {
     const REBOUND_DAMPING = 0.8; // Factor de reducción de velocidad tras el rebote
 
     const updateBalls = (deltaTime) => {
-      ballsRef.current = ballsRef.current.filter(({ mesh, velocity }) => {
-        velocity.y -= GRAVITY * deltaTime; // Aplicar gravedad
-        mesh.position.addScaledVector(velocity, deltaTime); // Actualizar posición de la pelota
+      ballsRef.current = ballsRef.current.filter(({ mesh, velocity, isEnemyBall, origin }) => {
+        velocity.y -= GRAVITY * deltaTime; // Apply gravity
+        mesh.position.addScaledVector(velocity, deltaTime); // Update position
     
         const collisionResult = worldOctree.current.sphereIntersect(new THREE.Sphere(mesh.position, 0.2));
         if (collisionResult) {
@@ -145,18 +166,28 @@ const App = () => {
           mesh.position.addScaledVector(collisionResult.normal, collisionResult.depth);
         }
     
-        // Verificar colisión con enemigos
-        enemiesRef.current = enemiesRef.current.filter(({ mesh: enemyMesh }) => {
-          const distance = mesh.position.distanceTo(enemyMesh.position);
-          if (distance < 0.5) {
-            setScore(prevScore => prevScore + 10); // Incrementar puntaje // Incrementar puntaje
-            sceneRef.current.remove(enemyMesh); // Eliminar enemigo
+        // Handle collision with player or enemies
+        if (isEnemyBall) {
+          const playerDistance = mesh.position.distanceTo(cameraRef.current.position);
+          if (playerDistance < 1.0) {
+            setScore((prevScore) => Math.max(prevScore - 10, 0)); // Reduce player score
+            sceneRef.current.remove(mesh); // Remove the ball
             return false;
           }
-          return true;
-        });
+        } else {
+          // Handle collision with enemies, but ignore the origin
+          enemiesRef.current = enemiesRef.current.filter(({ mesh: enemyMesh }) => {
+            const distance = mesh.position.distanceTo(enemyMesh.position);
+            if (distance < 0.5 && origin !== enemyMesh) {
+              setScore((prevScore) => prevScore + 10); // Increment score
+              sceneRef.current.remove(enemyMesh); // Remove enemy
+              return false;
+            }
+            return true;
+          });
+        }
     
-        // Eliminar la pelota si está fuera de rango
+        // Remove the ball if out of range
         if (mesh.position.length() > 100) {
           sceneRef.current.remove(mesh);
           return false;
@@ -164,24 +195,54 @@ const App = () => {
     
         return true;
       });
-    };
-    
+    };    
     
 
     const updateEnemies = (deltaTime) => {
       const playerPosition = cameraRef.current.position;
     
-      enemiesRef.current.forEach(({ mesh }) => {
-        const direction = new THREE.Vector3();
-        direction.subVectors(playerPosition, mesh.position).normalize();
+      enemiesRef.current.forEach((enemy) => {
+        const { mesh, nextThrow, lastDodge } = enemy;
     
-        mesh.position.addScaledVector(direction, ENEMY_SPEED * deltaTime); // Mover enemigo hacia el jugador
+        // Detect balls heading towards the enemy
+        const dangerBalls = ballsRef.current.filter(({ mesh: ballMesh, velocity }) => {
+          const toEnemy = new THREE.Vector3().subVectors(mesh.position, ballMesh.position);
+          const dotProduct = toEnemy.dot(velocity.clone().normalize()); // Check if the ball is moving toward the enemy
+          const distance = toEnemy.length();
+          return dotProduct > 0 && distance < 5; // Adjust "5" for dodge sensitivity range
+        });
     
-        // Verificar si el enemigo alcanzó al jugador
-        const distance = mesh.position.distanceTo(playerPosition);
-        if (distance < 1.0) {
-          setScore(prevScore => Math.max(prevScore - 4, 0)); // Reducir puntaje sin permitir valores negativos
-          sceneRef.current.remove(mesh); // Eliminar enemigo alcanzado
+        const currentTime = clock.getElapsedTime();
+    
+        if (dangerBalls.length > 0 && currentTime >= (lastDodge || 0) + ENEMY_DODGE_COOLDOWN) {
+          // Only dodge if the ball is very close and randomly decide not to dodge
+          const dangerBall = dangerBalls[0];
+          const distanceToBall = dangerBall.mesh.position.distanceTo(mesh.position);
+    
+          if (distanceToBall < 3 && Math.random() > 0.2) { // 80% chance to dodge
+            const dodgeDirection = new THREE.Vector3()
+              .crossVectors(dangerBall.velocity, new THREE.Vector3(0, 1, 0)) // Perpendicular direction
+              .normalize()
+              .multiplyScalar(ENEMY_DODGE_SPEED * deltaTime);
+    
+            // Add slight randomness to dodge like a human reaction
+            dodgeDirection.x += (Math.random() - 0.5) * 0.2;
+            dodgeDirection.z += (Math.random() - 0.5) * 0.2;
+    
+            mesh.position.add(dodgeDirection);
+            enemy.lastDodge = currentTime; // Update last dodge time
+          }
+        } else {
+          // Move toward the player if no danger
+          const direction = new THREE.Vector3();
+          direction.subVectors(playerPosition, mesh.position).normalize();
+          mesh.position.addScaledVector(direction, ENEMY_SPEED * deltaTime);
+        }
+    
+        // Throw balls at the player
+        if (currentTime >= nextThrow) {
+          throwEnemyBall(mesh.position, playerPosition, mesh);
+          enemy.nextThrow = currentTime + ENEMY_THROW_INTERVAL; // Reset throw timer
         }
       });
     };
@@ -242,25 +303,31 @@ const App = () => {
 
   useEffect(() => {
     const spawnEnemy = () => {
-      const enemyGeometry = new THREE.SphereGeometry(0.3, 16, 16); // Tamaño del muñeco
-      const enemyMaterial = new THREE.MeshStandardMaterial({
-        color: 0x00ff00,
-      });
+      const enemyGeometry = new THREE.SphereGeometry(0.3, 16, 16); // Enemy size
+      const enemyMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
       const enemy = new THREE.Mesh(enemyGeometry, enemyMaterial);
       enemy.castShadow = true;
-
-      // Generar el enemigo en una posición aleatoria dentro de un rango
+    
+      // Generate random spawn position
       const spawnRange = 20;
       enemy.position.set(
         (Math.random() - 0.5) * spawnRange,
-        1, // Altura inicial
+        1,
         (Math.random() - 0.5) * spawnRange
       );
-
-      // Agregar al array y a la escena
-      enemiesRef.current.push({ mesh: enemy, velocity: new THREE.Vector3() });
+    
+      // Add to enemies list with `nextThrow` and `lastDodge` initialized
+      enemiesRef.current.push({
+        mesh: enemy,
+        velocity: new THREE.Vector3(),
+        nextThrow: clock.getElapsedTime() + ENEMY_THROW_INTERVAL, // Initial throw timer
+        lastDodge: 0, // Initialize dodge cooldown timer
+      });
+    
       sceneRef.current.add(enemy);
     };
+    
+    
 
     // Crear un intervalo para spawnear enemigos
     const intervalId = setInterval(spawnEnemy, ENEMY_SPAWN_INTERVAL * 1000);
@@ -353,6 +420,31 @@ const App = () => {
 
     sceneRef.current.add(ball);
   };
+
+  const throwEnemyBall = (enemyPosition, targetPosition, originMesh) => {
+    const ballGeometry = new THREE.SphereGeometry(0.2, 16, 16);
+    const ballMaterial = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+    const ball = new THREE.Mesh(ballGeometry, ballMaterial);
+    ball.castShadow = true;
+    ball.position.copy(enemyPosition);
+  
+    // Calculate direction toward the player
+    const velocity = new THREE.Vector3()
+      .subVectors(targetPosition, enemyPosition)
+      .normalize()
+      .multiplyScalar(10); // Adjust speed if needed
+  
+    ballsRef.current.push({
+      mesh: ball,
+      velocity,
+      isEnemyBall: true, // Mark as enemy ball
+      origin: originMesh, // Reference to the enemy that threw the ball
+    });
+  
+    sceneRef.current.add(ball);
+  };
+  
+  
 
   return (
     <div ref={containerRef} id="container">
