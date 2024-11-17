@@ -9,11 +9,11 @@ import { Octree } from "three/addons/math/Octree.js";
 import { Capsule } from "three/addons/math/Capsule.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
-const GRAVITY = 30;
+const GRAVITY = 40;
 const STEPS_PER_FRAME = 5;
 const playerVelocity = new THREE.Vector3();
 const keyStates = {};
-const ENEMY_DODGE_SPEED = 5; // Velocidad de esquiva de los enemigos
+const ENEMY_DODGE_SPEED = 20; // Velocidad de esquiva de los enemigos
 const ENEMY_THROW_INTERVAL = 5; // Intervalo entre lanzamientos de enemigos
 const ENEMY_DODGE_COOLDOWN = 3; // Cooldown time in seconds
 
@@ -200,52 +200,101 @@ const App = () => {
 
     const updateEnemies = (deltaTime) => {
       const playerPosition = cameraRef.current.position;
+      const currentTime = clock.getElapsedTime();
     
-      enemiesRef.current.forEach((enemy) => {
-        const { mesh, nextThrow, lastDodge } = enemy;
+      enemiesRef.current.forEach((enemy, index) => {
+        const { mesh, velocity, lastDodge, nextThrow, dangerLevel } = enemy;
     
-        // Detect balls heading towards the enemy
-        const dangerBalls = ballsRef.current.filter(({ mesh: ballMesh, velocity }) => {
+        // Detect balls heading toward the enemy
+        const dangerBalls = ballsRef.current.filter(({ mesh: ballMesh, velocity: ballVelocity }) => {
           const toEnemy = new THREE.Vector3().subVectors(mesh.position, ballMesh.position);
-          const dotProduct = toEnemy.dot(velocity.clone().normalize()); // Check if the ball is moving toward the enemy
+          const dotProduct = toEnemy.dot(ballVelocity.clone().normalize()); // Ball moving toward enemy
           const distance = toEnemy.length();
-          return dotProduct > 0 && distance < 5; // Adjust "5" for dodge sensitivity range
+    
+          // Multi-step prediction for ball trajectory
+          const ballFuturePosition = ballMesh.position.clone().add(ballVelocity.clone().multiplyScalar(0.5)); // Predict half-second ahead
+          const futureDistance = mesh.position.distanceTo(ballFuturePosition);
+    
+          return dotProduct > 0 && distance < 8 && futureDistance < 2; // Approaching and within danger range
         });
     
-        const currentTime = clock.getElapsedTime();
+        // Adjust danger level for adaptive behavior
+        enemy.dangerLevel = Math.min(1, dangerBalls.length / 2); // Scale between 0 (safe) and 1 (high danger)
     
-        if (dangerBalls.length > 0 && currentTime >= (lastDodge || 0) + ENEMY_DODGE_COOLDOWN) {
-          // Only dodge if the ball is very close and randomly decide not to dodge
+        // Dodging behavior
+        if (dangerBalls.length > 0 && currentTime >= (lastDodge || 0) + enemy.dodgeCooldown) {
           const dangerBall = dangerBalls[0];
-          const distanceToBall = dangerBall.mesh.position.distanceTo(mesh.position);
     
-          if (distanceToBall < 3 && Math.random() > 0.2) { // 80% chance to dodge
-            const dodgeDirection = new THREE.Vector3()
-              .crossVectors(dangerBall.velocity, new THREE.Vector3(0, 1, 0)) // Perpendicular direction
-              .normalize()
-              .multiplyScalar(ENEMY_DODGE_SPEED * deltaTime);
+          // Calculate dodge direction and ensure obstacle-free path
+          const dodgeDirection = calculateDodgeDirection(mesh, dangerBall);
     
-            // Add slight randomness to dodge like a human reaction
-            dodgeDirection.x += (Math.random() - 0.5) * 0.2;
-            dodgeDirection.z += (Math.random() - 0.5) * 0.2;
+          velocity.add(dodgeDirection.multiplyScalar(
+            ENEMY_DODGE_SPEED + Math.random() * 2 + enemy.dangerLevel * 5 // Adjust dodge speed based on danger level
+          ));
     
-            mesh.position.add(dodgeDirection);
-            enemy.lastDodge = currentTime; // Update last dodge time
-          }
+          enemy.lastDodge = currentTime; // Update dodge cooldown
         } else {
-          // Move toward the player if no danger
-          const direction = new THREE.Vector3();
-          direction.subVectors(playerPosition, mesh.position).normalize();
-          mesh.position.addScaledVector(direction, ENEMY_SPEED * deltaTime);
+          // Gradual stop when not actively dodging
+          velocity.multiplyScalar(0.8);
         }
     
-        // Throw balls at the player
-        if (currentTime >= nextThrow) {
-          throwEnemyBall(mesh.position, playerPosition, mesh);
-          enemy.nextThrow = currentTime + ENEMY_THROW_INTERVAL; // Reset throw timer
+        // Strategic movement when not dodging
+        if (dangerBalls.length === 0) {
+          const directionToPlayer = new THREE.Vector3()
+            .subVectors(playerPosition, mesh.position)
+            .normalize();
+    
+          // Add a random offset to prevent linear behavior
+          directionToPlayer.x += (Math.random() - 0.5) * 0.5;
+          directionToPlayer.z += (Math.random() - 0.5) * 0.5;
+    
+          mesh.position.addScaledVector(directionToPlayer, ENEMY_SPEED * (1 + enemy.dangerLevel) * deltaTime);
         }
+    
+        // Throw a ball at the player if cooldown allows
+        if (currentTime >= (nextThrow || 0)) {
+          throwEnemyBall(mesh.position, predictPlayerPosition(playerPosition), mesh);
+          enemy.nextThrow = currentTime + ENEMY_THROW_INTERVAL - enemy.dangerLevel * 2; // Faster throws in high danger
+        }
+    
+        // Update position based on velocity
+        mesh.position.addScaledVector(velocity, deltaTime);
       });
     };
+    
+    // Function to calculate dodge direction using raycasting and obstacle awareness
+    const calculateDodgeDirection = (enemyMesh, dangerBall) => {
+      const dodgeOptions = [
+        new THREE.Vector3(1, 0, 0),  // Right
+        new THREE.Vector3(-1, 0, 0), // Left
+        new THREE.Vector3(0, 0, 1),  // Forward
+        new THREE.Vector3(0, 0, -1), // Backward
+      ];
+    
+      const safeDirections = dodgeOptions.filter((direction) => {
+        const raycaster = new THREE.Raycaster(enemyMesh.position, direction);
+        const intersections = raycaster.intersectObjects(sceneRef.current.children, true);
+        return intersections.length === 0 || intersections[0].distance > 2; // No immediate obstacles
+      });
+    
+      if (safeDirections.length > 0) {
+        return safeDirections[Math.floor(Math.random() * safeDirections.length)].normalize(); // Randomize dodge direction
+      }
+    
+      // Default to moving upwards slightly if no safe direction
+      return new THREE.Vector3(0, 1, 0).normalize();
+    };
+    
+    // Predict player movement for more accurate enemy throws
+    const predictPlayerPosition = (currentPlayerPosition) => {
+      const playerVelocity = new THREE.Vector3();
+      playerVelocity.copy(cameraRef.current.getWorldDirection(new THREE.Vector3()));
+      playerVelocity.multiplyScalar(2); // Assume player is moving at a constant speed
+    
+      return currentPlayerPosition.clone().add(playerVelocity.multiplyScalar(0.3)); // Predict position slightly ahead
+    };
+    
+    
     
 
     const animate = () => {
@@ -307,7 +356,7 @@ const App = () => {
       const enemyMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
       const enemy = new THREE.Mesh(enemyGeometry, enemyMaterial);
       enemy.castShadow = true;
-    
+  
       // Generate random spawn position
       const spawnRange = 20;
       enemy.position.set(
@@ -315,26 +364,40 @@ const App = () => {
         1,
         (Math.random() - 0.5) * spawnRange
       );
-    
-      // Add to enemies list with `nextThrow` and `lastDodge` initialized
+  
+      // Add to enemies list with randomized dodge cooldown and speed
       enemiesRef.current.push({
         mesh: enemy,
         velocity: new THREE.Vector3(),
         nextThrow: clock.getElapsedTime() + ENEMY_THROW_INTERVAL, // Initial throw timer
         lastDodge: 0, // Initialize dodge cooldown timer
+        dodgeCooldown: ENEMY_DODGE_COOLDOWN + Math.random() * 1.5, // Random dodge cooldown
       });
-    
+  
       sceneRef.current.add(enemy);
     };
-    
-    
-
-    // Crear un intervalo para spawnear enemigos
+  
+    // Create interval for spawning enemies
     const intervalId = setInterval(spawnEnemy, ENEMY_SPAWN_INTERVAL * 1000);
-
-    // Limpiar el intervalo al desmontar
+  
+    // Clear interval on unmount
     return () => clearInterval(intervalId);
   }, []);
+  
+
+  useEffect(() => {
+    const scalingInterval = setInterval(() => {
+      ENEMY_SPAWN_INTERVAL = Math.max(ENEMY_SPAWN_INTERVAL - 0.5, 2); // Faster spawns
+      ENEMY_DODGE_COOLDOWN = Math.max(ENEMY_DODGE_COOLDOWN - 0.2, 0.5); // Faster dodges
+      ENEMY_DODGE_SPEED += 0.3; // Increase dodge speed
+      ENEMY_SPEED += 0.2; // Faster movement speed
+    }, 30000); // Scale every 30 seconds
+  
+    return () => clearInterval(scalingInterval);
+  }, []);
+  
+  
+  
 
   const controls = (deltaTime) => {
     const speedDelta = deltaTime * (playerOnFloorRef.current ? 25 : 8);
