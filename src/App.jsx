@@ -8,6 +8,7 @@ import { Octree } from "three/examples/jsm/math/Octree.js";
 import { Capsule } from "three/examples/jsm/math/Capsule.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
+
 const GRAVITY = 40;
 const STEPS_PER_FRAME = 5;
 let ENEMY_SPAWN_INTERVAL = 5;
@@ -24,6 +25,7 @@ const App = () => {
   const [isCharging, setIsCharging] = useState(false);
   const [chargeLevel, setChargeLevel] = useState(0);
   const [lockOnTarget, setLockOnTarget] = useState(null);
+  const collisionSound = useRef(new Audio("audio.mp3"));
 
   const containerRef = useRef(null);
   const rendererRef = useRef(null);
@@ -67,6 +69,20 @@ const App = () => {
 
     return () => {
       document.body.removeChild(crosshair);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Crear el objeto de audio
+    const soundtrack = new Audio("./music/soundtrack.mp3");
+    soundtrack.loop = true; // Reproducir en bucle
+    soundtrack.volume = 0.5; // Ajustar el volumen (opcional)
+    soundtrack.play(); // Iniciar la reproducción
+
+    // Limpiar el audio cuando se salga del juego o componente
+    return () => {
+      soundtrack.pause();
+      soundtrack.currentTime = 0; // Reiniciar el audio
     };
   }, []);
 
@@ -403,7 +419,7 @@ const App = () => {
   const updateBalls = (deltaTime) => {
     ballsRef.current = ballsRef.current.filter((ball) => {
       const { mesh, velocity, isEnemyBall, origin, isCollectible, target, hasCollided } = ball;
-
+  
       if (!isCollectible) {
         if (target && !hasCollided) {
           // Homing behavior
@@ -411,7 +427,7 @@ const App = () => {
           const directionToTarget = targetPosition
             .sub(mesh.position)
             .normalize();
-
+  
           // Gradually adjust velocity towards the target
           velocity.lerp(directionToTarget.multiplyScalar(velocity.length()), 0.05);
         } else if (isEnemyBall && !hasCollided) {
@@ -420,11 +436,11 @@ const App = () => {
           const directionToPlayer = playerPosition.sub(mesh.position).normalize();
           velocity.lerp(directionToPlayer.multiplyScalar(velocity.length()), 0.02);
         }
-
+  
         velocity.y -= GRAVITY * deltaTime;
         mesh.position.addScaledVector(velocity, deltaTime);
       }
-
+  
       const collisionResult = worldOctree.current.sphereIntersect(
         new THREE.Sphere(mesh.position, 0.2)
       );
@@ -435,7 +451,11 @@ const App = () => {
           mesh.material.color.set(0x00ffff);
           mesh.material.emissive = new THREE.Color(0x00ffff);
           mesh.material.emissiveIntensity = 1;
-
+  
+          // Reproducir sonido al colisionar
+          const collisionSound = new Audio("audio.mp3");
+          collisionSound.play();
+  
           // Apply friction and bounce
           const normal = collisionResult.normal.clone();
           const velocityDotNormal = velocity.dot(normal);
@@ -448,7 +468,7 @@ const App = () => {
           );
         }
       }
-
+  
       if (ball.isCollectible) {
         const playerDistance = mesh.position.distanceTo(
           cameraRef.current.position
@@ -457,7 +477,7 @@ const App = () => {
           sceneRef.current.remove(mesh);
           return false;
         }
-
+  
         enemiesRef.current.forEach((enemy) => {
           const enemyDistance = mesh.position.distanceTo(enemy.mesh.position);
           if (enemyDistance < 1.0 && !enemy.hasBall) {
@@ -479,6 +499,10 @@ const App = () => {
             mesh.material.color.set(0x00ffff);
             mesh.material.emissive = new THREE.Color(0x00ffff);
             mesh.material.emissiveIntensity = 1;
+  
+            // Reproducir sonido en colisión con el jugador
+            const collisionSound = new Audio("audio.mp3");
+            collisionSound.play();
           }
         } else if (!isEnemyBall && !hasCollided) {
           for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
@@ -497,20 +521,25 @@ const App = () => {
               mesh.material.color.set(0x00ffff);
               mesh.material.emissive = new THREE.Color(0x00ffff);
               mesh.material.emissiveIntensity = 1;
+  
+              // Reproducir sonido en colisión con el enemigo
+              const collisionSound = new Audio("./music/dodgeball.mp3");
+              collisionSound.play();
               break;
             }
           }
         }
       }
-
+  
       if (mesh.position.length() > 100) {
         sceneRef.current.remove(mesh);
         return false;
       }
-
+  
       return true;
     });
   };
+  
 
   const updateEnemies = (deltaTime) => {
     const playerPosition = cameraRef.current.position;
