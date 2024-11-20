@@ -15,7 +15,9 @@ let ENEMY_SPEED = 2;
 let ENEMY_THROW_INTERVAL = 5;
 let ENEMY_DODGE_COOLDOWN = 3;
 let ENEMY_DODGE_SPEED = 5;
-const CHARGE_TIME = 3; // Maximum charge time in seconds
+const MAX_CHARGE_LEVEL = 1; // Nivel máximo de carga
+const CHARGE_RATE = 1 / 3; // Tasa de carga (1 / tiempo máximo de carga en segundos)
+const MAX_PLAYER_BALLS = 5; // Máximo de pelotas que el jugador puede tener
 
 const App = () => {
   const [score, setScore] = useState(0);
@@ -24,6 +26,9 @@ const App = () => {
   const [isCharging, setIsCharging] = useState(false);
   const [chargeLevel, setChargeLevel] = useState(0);
   const [lockOnTarget, setLockOnTarget] = useState(null);
+  const [playerBalls, setPlayerBalls] = useState(1); // Inicializar con una pelota
+  const [isPaused, setIsPaused] = useState(false); // Estado de pausa
+  const collisionSound = useRef(new Audio("audio.mp3"));
 
   const containerRef = useRef(null);
   const rendererRef = useRef(null);
@@ -39,7 +44,11 @@ const App = () => {
   const clock = useRef(new THREE.Clock());
   const worldOctree = useRef(new Octree());
   const playerCollider = useRef(
-    new Capsule(new THREE.Vector3(0, 0.35, 0), new THREE.Vector3(0, 1, 0), 0.35)
+    new Capsule(
+      new THREE.Vector3(0, 0.35, 0),
+      new THREE.Vector3(0, 1, 0),
+      0.35
+    )
   );
   const playerOnFloorRef = useRef(false);
   const animationRef = useRef();
@@ -47,6 +56,40 @@ const App = () => {
   const enemiesRef = useRef([]);
   const keyStates = {};
   const playerVelocity = useRef(new THREE.Vector3());
+
+  // Función para reiniciar el juego
+  const resetGame = () => {
+    // Resetear estados
+    setScore(0);
+    setTimeLeft(300);
+    setGameOver(false);
+    setIsPaused(false);
+    setIsCharging(false);
+    setChargeLevel(0);
+    setLockOnTarget(null);
+    setPlayerBalls(1);
+
+    // Resetear jugador
+    playerCollider.current.start.set(0, 0.35, 0);
+    playerCollider.current.end.set(0, 1, 0);
+    playerVelocity.current.set(0, 0, 0);
+    cameraRef.current.position.copy(playerCollider.current.end);
+
+    // Eliminar todas las pelotas
+    ballsRef.current.forEach((ball) => {
+      sceneRef.current.remove(ball.mesh);
+    });
+    ballsRef.current = [];
+
+    // Eliminar todos los enemigos
+    enemiesRef.current.forEach((enemy) => {
+      sceneRef.current.remove(enemy.mesh);
+    });
+    enemiesRef.current = [];
+
+    // Re-inicializar el mundo (si es necesario)
+    // Opcional: Recargar el modelo de colisión si fue removido
+  };
 
   useEffect(() => {
     const crosshair = document.createElement("div");
@@ -70,18 +113,25 @@ const App = () => {
     // Crear el objeto de audio
     const soundtrack = new Audio("./music/soundtrack.mp3");
     soundtrack.loop = true; // Reproducir en bucle
-    soundtrack.volume = 1; // Ajustar el volumen (opcional)
+    soundtrack.volume = 0.5; // Ajustar el volumen (opcional)
     soundtrack.play(); // Iniciar la reproducción
+
+    // Limpiar el audio cuando se salga del juego o componente
+    return () => {
+      soundtrack.pause();
+      soundtrack.currentTime = 0; // Reiniciar el audio
+    };
   }, []);
 
   useEffect(() => {
-    if (timeLeft > 0 && !gameOver) {
+    if (timeLeft > 0 && !gameOver && !isPaused) {
       const timer = setInterval(() => setTimeLeft((prev) => prev - 1), 1000);
       return () => clearInterval(timer);
-    } else if (timeLeft <= 0) {
+    } else if (timeLeft <= 0 && !gameOver) {
       setGameOver(true);
+      setIsPaused(true); // Pausar el juego al finalizar
     }
-  }, [timeLeft, gameOver]);
+  }, [timeLeft, gameOver, isPaused]);
 
   useEffect(() => {
     const loader = new GLTFLoader();
@@ -110,7 +160,7 @@ const App = () => {
     camera.rotation.order = "YXZ";
 
     const onMouseMove = (event) => {
-      if (document.pointerLockElement === containerRef.current) {
+      if (document.pointerLockElement === containerRef.current && !isPaused) {
         camera.rotation.y -= event.movementX / 500;
         camera.rotation.x -= event.movementY / 500;
       }
@@ -124,6 +174,10 @@ const App = () => {
 
     const onKeyDown = (event) => {
       keyStates[event.code] = true;
+      // Escuchar tecla Escape para pausar/reanudar
+      if (event.code === "Escape" && !gameOver) {
+        setIsPaused((prev) => !prev);
+      }
     };
 
     const onKeyUp = (event) => {
@@ -134,15 +188,20 @@ const App = () => {
     document.addEventListener("keyup", onKeyUp);
 
     const animate = () => {
-      const deltaTime =
-        Math.min(0.05, clock.current.getDelta()) / STEPS_PER_FRAME;
+      if (!isPaused && !gameOver) {
+        const deltaTime = Math.min(0.05, clock.current.getDelta()) / STEPS_PER_FRAME;
 
-      for (let i = 0; i < STEPS_PER_FRAME; i++) {
-        controls(deltaTime);
-        updatePlayer(deltaTime);
-        updateBalls(deltaTime);
-        updateEnemies(deltaTime);
-        teleportPlayerIfOob();
+        for (let i = 0; i < STEPS_PER_FRAME; i++) {
+          controls(deltaTime);
+          updatePlayer(deltaTime);
+          updateBalls(deltaTime);
+          updateEnemies(deltaTime);
+          teleportPlayerIfOob();
+
+          if (isCharging) {
+            setChargeLevel((prev) => Math.min(prev + CHARGE_RATE * deltaTime, MAX_CHARGE_LEVEL));
+          }
+        }
       }
 
       renderer.render(sceneRef.current, cameraRef.current);
@@ -175,18 +234,22 @@ const App = () => {
       renderer.dispose();
       cancelAnimationFrame(animationRef.current);
     };
-  }, []);
+  }, [isPaused, gameOver]);
 
   useEffect(() => {
     const onMouseDown = () => {
-      setIsCharging(true);
-      setChargeLevel(0);
+      if (playerBalls > 0 && !isPaused && !gameOver) { // Solo iniciar carga si tiene pelotas y no está pausado o terminado
+        setIsCharging(true);
+        setChargeLevel(0);
+      }
     };
 
     const onMouseUp = () => {
-      setIsCharging(false);
-      shootBall();
-      setChargeLevel(0);
+      if (isCharging && !isPaused && !gameOver) {
+        setIsCharging(false);
+        shootBall();
+        setChargeLevel(0);
+      }
     };
 
     document.addEventListener("mousedown", onMouseDown);
@@ -196,20 +259,7 @@ const App = () => {
       document.removeEventListener("mousedown", onMouseDown);
       document.removeEventListener("mouseup", onMouseUp);
     };
-  }, []);
-
-  useEffect(() => {
-    let chargeInterval;
-    if (isCharging) {
-      chargeInterval = setInterval(() => {
-        setChargeLevel((prev) => Math.min(prev + 0.02, 1));
-      }, (CHARGE_TIME * 1000) / 50); // Adjusted for smoother charging
-    } else {
-      clearInterval(chargeInterval);
-    }
-
-    return () => clearInterval(chargeInterval);
-  }, [isCharging]);
+  }, [isCharging, playerBalls, isPaused, gameOver]);
 
   useEffect(() => {
     if (isCharging) {
@@ -223,7 +273,8 @@ const App = () => {
         const enemyDirection = new THREE.Vector3()
           .subVectors(enemy.mesh.position, cameraRef.current.position)
           .normalize();
-        const angle = cameraDirection.angleTo(enemyDirection) * (180 / Math.PI);
+        const angle =
+          cameraDirection.angleTo(enemyDirection) * (180 / Math.PI);
 
         if (angle < 11 && angle < minAngle) {
           minAngle = angle;
@@ -371,6 +422,9 @@ const App = () => {
   };
 
   const shootBall = () => {
+    if (playerBalls <= 0) return; // Verificar si el jugador tiene pelotas
+    setPlayerBalls((prev) => prev - 1); // Decrementar el número de pelotas
+
     const ballGeometry = new THREE.SphereGeometry(0.2, 16, 16);
     const ballMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
     const ball = new THREE.Mesh(ballGeometry, ballMaterial);
@@ -397,8 +451,8 @@ const App = () => {
       isEnemyBall: false,
       origin: null,
       isCollectible: false,
-      target, // Set the target for homing behavior
-      hasCollided: false, // Flag to check if ball has collided
+      target, // Comportamiento de seguimiento
+      hasCollided: false, // Bandera para verificar colisión
     });
 
     sceneRef.current.add(ball);
@@ -406,39 +460,26 @@ const App = () => {
 
   const updateBalls = (deltaTime) => {
     ballsRef.current = ballsRef.current.filter((ball) => {
-      const {
-        mesh,
-        velocity,
-        isEnemyBall,
-        origin,
-        isCollectible,
-        target,
-        hasCollided,
-      } = ball;
+      const { mesh, velocity, isEnemyBall, origin, isCollectible, target, hasCollided } = ball;
 
       if (!isCollectible) {
         if (target && !hasCollided) {
-          // Homing behavior
+          // Comportamiento de seguimiento
           const targetPosition = target.position.clone();
           const directionToTarget = targetPosition
             .sub(mesh.position)
             .normalize();
 
-          // Gradually adjust velocity towards the target
-          velocity.lerp(
-            directionToTarget.multiplyScalar(velocity.length()),
-            0.05
-          );
+          // Ajustar gradualmente la velocidad hacia el objetivo
+          // Reducir el factor de interpolación para hacer el seguimiento más sutil
+          const homingFactor = isEnemyBall ? 0.02 : 0.01;
+          velocity.lerp(directionToTarget.multiplyScalar(velocity.length()), homingFactor);
         } else if (isEnemyBall && !hasCollided) {
-          // Enemy balls home towards the player
+          // Las pelotas de los enemigos persiguen al jugador de manera sutil
           const playerPosition = cameraRef.current.position.clone();
-          const directionToPlayer = playerPosition
-            .sub(mesh.position)
-            .normalize();
-          velocity.lerp(
-            directionToPlayer.multiplyScalar(velocity.length()),
-            0.02
-          );
+          const directionToPlayer = playerPosition.sub(mesh.position).normalize();
+          const homingFactor = 0.02;
+          velocity.lerp(directionToPlayer.multiplyScalar(velocity.length()), homingFactor);
         }
 
         velocity.y -= GRAVITY * deltaTime;
@@ -457,15 +498,15 @@ const App = () => {
           mesh.material.emissiveIntensity = 1;
 
           // Reproducir sonido al colisionar
-          const collisionSound = new Audio("./music/dodgeball.mp3");
+          const collisionSound = new Audio("audio.mp3");
           collisionSound.play();
 
-          // Apply friction and bounce
+          // Aplicar fricción y rebote
           const normal = collisionResult.normal.clone();
           const velocityDotNormal = velocity.dot(normal);
           velocity.addScaledVector(normal, -2 * velocityDotNormal);
-          velocity.multiplyScalar(0.5); // Reduce speed after collision
-          velocity.y = 0; // Stop vertical movement
+          velocity.multiplyScalar(0.5); // Reducir velocidad después de la colisión
+          velocity.y = 0; // Detener movimiento vertical
           mesh.position.addScaledVector(
             collisionResult.normal,
             collisionResult.depth
@@ -478,6 +519,14 @@ const App = () => {
           cameraRef.current.position
         );
         if (playerDistance < 1.0) {
+          if (isEnemyBall) {
+            // Punto 1: Recolectar pelotas de enemigos para usarlas
+            setPlayerBalls((prev) => Math.min(prev + 1, MAX_PLAYER_BALLS));
+            // Opcional: Añadir efectos visuales o de sonido
+          } else {
+            // Recolectar pelota del jugador para recargar
+            setPlayerBalls((prev) => Math.min(prev + 1, MAX_PLAYER_BALLS));
+          }
           sceneRef.current.remove(mesh);
           return false;
         }
@@ -505,7 +554,7 @@ const App = () => {
             mesh.material.emissiveIntensity = 1;
 
             // Reproducir sonido en colisión con el jugador
-            const collisionSound = new Audio("./music/dodgeball.mp3");
+            const collisionSound = new Audio("audio.mp3");
             collisionSound.play();
           }
         } else if (!isEnemyBall && !hasCollided) {
@@ -555,7 +604,7 @@ const App = () => {
         let nearestBall = null;
         let minDistance = Infinity;
         ballsRef.current.forEach((ball) => {
-          if (ball.isCollectible) {
+          if (ball.isCollectible && ball.isEnemyBall) { // Solo considerar pelotas de enemigos
             const distance = mesh.position.distanceTo(ball.mesh.position);
             if (distance < minDistance) {
               minDistance = distance;
@@ -568,10 +617,7 @@ const App = () => {
           const directionToBall = new THREE.Vector3()
             .subVectors(nearestBall.mesh.position, mesh.position)
             .normalize();
-          mesh.position.addScaledVector(
-            directionToBall,
-            ENEMY_SPEED * deltaTime
-          );
+          mesh.position.addScaledVector(directionToBall, ENEMY_SPEED * deltaTime);
 
           if (minDistance < 1.0) {
             enemy.hasBall = true;
@@ -625,7 +671,7 @@ const App = () => {
       isEnemyBall: true,
       origin: originMesh,
       isCollectible: false,
-      target: cameraRef.current, // Enemy balls home towards the player
+      target: cameraRef.current, // Las pelotas de enemigos siguen al jugador
       hasCollided: false,
     });
 
@@ -635,26 +681,47 @@ const App = () => {
   return (
     <div ref={containerRef} id="container">
       <div className="hud">
-        <p>Score: {score}</p>
-        <p>
-          Time Left: {Math.floor(timeLeft / 60)}:
-          {String(timeLeft % 60).padStart(2, "0")}
-        </p>
+        <div className="top-info">
+          <p>Score: {score}</p>
+          <p>
+            Time Left: {Math.floor(timeLeft / 60)}:
+            {String(timeLeft % 60).padStart(2, "0")}
+          </p>
+          <p>Balls: {playerBalls}</p> {/* Mostrar número de pelotas */}
+        </div>
+        <div className="bottom-info">
+          <div className="charge-bar">
+            <div
+              className="charge-level"
+              style={{ width: `${chargeLevel * 100}%` }}
+            ></div>
+          </div>
+        </div>
       </div>
-      {isCharging && (
-        <div className="charge-bar">
-          <div
-            className="charge-level"
-            style={{ width: `${chargeLevel * 100}%` }}
-          ></div>
+
+      {/* Pantalla de Pausa y Fin de Juego */}
+      {(isPaused || gameOver) && (
+        <div className="overlay">
+          <div className="menu">
+            <h1>{gameOver ? "Game Over" : "Pausa"}</h1>
+            {gameOver && <p>Your Score: {score}</p>}
+            <button onClick={() => setIsPaused(false)} disabled={gameOver}>
+              Continuar
+            </button>
+            <button onClick={resetGame}>Reiniciar</button>
+          </div>
         </div>
       )}
+
+      {/* Mostrar Game Over cuando termina el juego */}
       {gameOver && (
         <div className="game-over">
           <h1>Game Over</h1>
           <p>Your Score: {score}</p>
+          <button onClick={resetGame}>Reiniciar</button>
         </div>
       )}
+
       <Scene scene={sceneRef.current} />
       <Camera
         renderer={rendererRef.current}
